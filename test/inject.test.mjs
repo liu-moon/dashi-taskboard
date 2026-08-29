@@ -361,6 +361,7 @@ test("host context captures all Codex projects even when the sidebar section is 
   assert.match(source, /async function readCodexProjectMetadata\(\)/);
   assert.match(source, /await window\.electronBridge\?\.getInitialSidebarBootstrap\?\.\(\)/);
   assert.match(source, /entries\.get\("local-projects"\)/);
+  assert.match(source, /get-global-state[\s\S]*local-projects/);
   assert.match(source, /entries\.get\("remote-projects"\)/);
   assert.match(source, /projectKind: "remote"/);
   assert.match(source, /workspacePath,[\s\S]*?hostId/);
