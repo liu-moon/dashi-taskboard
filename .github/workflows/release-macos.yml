@@ -16,6 +16,7 @@ concurrency:
 jobs:
   release-linux:
     name: Build Ubuntu 24.04 x64 packages
+    if: github.repository == 'chuspeeism/dashi-taskboard'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -95,6 +96,7 @@ jobs:
 
   release-windows-preview:
     name: Build unsigned Windows x64 Preview
+    if: github.repository == 'chuspeeism/dashi-taskboard'
     runs-on: windows-2025
     timeout-minutes: 40
 
@@ -130,6 +132,7 @@ jobs:
 
   release-macos:
     name: Build signed universal macOS app
+    if: github.repository == 'chuspeeism/dashi-taskboard'
     needs:
       - release-linux
       - release-windows-preview
@@ -503,6 +506,7 @@ jobs:
 
   promote-release:
     name: Verify and publish immutable macOS release
+    if: github.repository == 'chuspeeism/dashi-taskboard'
     needs: release-macos
     runs-on: macos-latest
     timeout-minutes: 30
