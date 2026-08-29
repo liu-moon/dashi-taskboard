@@ -486,17 +486,28 @@
         .map((entry) => [entry?.key, entry?.value]),
     );
     const metadata = new Map();
-    const localProjects = entries.get("local-projects");
+    const liveLocalProjects = typeof requestNativeFetch === "function"
+      ? (await requestNativeFetch("get-global-state", { key: "local-projects" }))?.value
+      : null;
+    const localProjects = (
+      liveLocalProjects
+      && typeof liveLocalProjects === "object"
+      && !Array.isArray(liveLocalProjects)
+    )
+      ? liveLocalProjects
+      : entries.get("local-projects");
     if (localProjects && typeof localProjects === "object" && !Array.isArray(localProjects)) {
       Object.entries(localProjects).forEach(([projectId, project]) => {
         const id = projectId.trim();
         const workspacePath = Array.isArray(project?.rootPaths)
           ? project.rootPaths.find((root) => typeof root === "string" && root.trim())?.trim()
           : "";
+        const name = typeof project?.name === "string" ? project.name.trim() : "";
         if (!id) return;
         metadata.set(id, {
           projectKind: "local",
           hostId: "local",
+          ...(name ? { name } : {}),
           ...(workspacePath ? { workspacePath } : {}),
         });
       });
@@ -554,8 +565,12 @@
         return [{ id, name, ...metadata.get(id) }];
       });
     for (const [id, project] of metadata) {
-      if (project.projectKind !== "remote" || seen.has(id)) continue;
-      projects.push({ id, ...project });
+      if (seen.has(id)) continue;
+      const name = typeof project.name === "string" && project.name.trim()
+        ? project.name.trim()
+        : id;
+      seen.add(id);
+      projects.push({ id, name, ...project });
     }
     return projects;
   }
