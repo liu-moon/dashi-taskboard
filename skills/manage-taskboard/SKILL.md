@@ -14,7 +14,7 @@ Open only the relevant section of [references/cli.md](references/cli.md) when co
 - Use the exact `taskctl` binary and Taskboard URL supplied by the task or injected runtime. Do not replace them with a global CLI, the default port, or another board.
 - On macOS, when no binary is injected and the desktop app is installed, use `'/Applications/Codex Taskboard.app/Contents/Resources/bin/taskctl' issue get ID --json`. Keep the single quotes because the path contains a space. The packaged wrapper reads the active launcher runtime; do not search the filesystem for another CLI or reconstruct the tokenized URL.
 - On Linux, when no binary is injected and Codex was started by the desktop app, use `taskctl issue get ID --json`. The desktop app adds its packaged wrapper to the managed Codex `PATH`; do not search the filesystem for another CLI or reconstruct the tokenized URL.
-- If that exact command reaches a sandbox restriction on the loopback service, retry the same command with the required permission. Do not switch binaries or endpoints.
+- Every `taskctl` call that reaches the local Taskboard loopback service must request the required permission (`sandbox_permissions=require_escalated`) on the first attempt. Do not first run it in the default no-network sandbox. Do not treat `SERVICE_UNAVAILABLE` / `fetch failed` as a down service unless that same command has already been run with escalated permission. Do not switch binaries or endpoints.
 
 ## Terminology: local companion
 
