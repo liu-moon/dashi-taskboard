@@ -1,4 +1,4 @@
-import { useEffect, useState, type ClipboardEvent, type MouseEvent } from "react";
+import { memo, useEffect, useState, type ClipboardEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { attachmentContentUrl } from "../api";
 import { readIssueIdentifier } from "../issueRoute";
@@ -47,7 +47,7 @@ function fileSize(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
-export function DescriptionDocument({
+export const DescriptionDocument = memo(function DescriptionDocument({
   value,
   referenceTasks,
   onOpenTask,
@@ -113,7 +113,6 @@ export function DescriptionDocument({
                 src={attachmentContentUrl(attachment)}
                 aria-label={attachment.filename}
                 controls
-                onClick={(event) => event.stopPropagation()}
               />
             );
           }
@@ -207,4 +206,4 @@ export function DescriptionDocument({
       document.body,
     )}
   </>);
-}
+});

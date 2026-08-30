@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -971,14 +972,17 @@ export function TaskDetail({
     }
   }
 
-  function handleAttachmentDownload(event: MouseEvent<HTMLAnchorElement>, attachment: Attachment) {
+  const handleAttachmentDownload = useCallback((
+    event: MouseEvent<HTMLAnchorElement>,
+    attachment: Attachment,
+  ) => {
     event.preventDefault();
     event.stopPropagation();
     setAttachmentsError(null);
     void downloadAttachmentFile(attachment).catch((error) => {
       setAttachmentsError(messageFor(error));
     });
-  }
+  }, []);
 
   const developmentOptions = [...developmentScan.contexts];
   if (
@@ -1110,6 +1114,7 @@ export function TaskDetail({
                     tabIndex={0}
                     aria-label={text("编辑议题描述", "Edit issue description")}
                     onClick={(event) => {
+                      if (event.target instanceof Element && event.target.closest("video")) return;
                       if (window.getSelection()?.isCollapsed === false) return;
                       descriptionCaretRef.current = null;
                       const range = event.currentTarget.ownerDocument.caretRangeFromPoint(
