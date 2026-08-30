@@ -164,6 +164,7 @@ test("the stable name and generated prompt are project-scoped and encode the cla
   assert.match(prompt, /--binding-thread-id "\$CODEX_THREAD_ID"/);
   assert.match(prompt, /认领后的每一次 issue move.*五个完整 binding 字段/);
   assert.match(prompt, /不要省略 binding，避免把完整绑定降级为 legacy local/);
+  assert.match(prompt, /sandbox_permissions=require_escalated/);
   assert.doesNotMatch(prompt, /automation_update/);
   assert.match(prompt, /Taskboard 主机侧会暂停当前自动化/);
 });
