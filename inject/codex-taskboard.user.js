@@ -28,7 +28,7 @@
   const HOST_HEARTBEAT_MAX_AGE_MS = 8_000;
   const MACOS_TITLEBAR_SAFE_LEFT = 80;
   const FRAME_REFRESH_PARAM = "__codex_taskboard_refresh";
-  const PLUGIN_LABELS = ["插件", "plugins"];
+  const PLUGIN_LABELS = ["插件", "plugins", "外掛程式", "プラグイン"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
     "新聊天",
@@ -88,6 +88,7 @@
   let pendingThreadCreation = null;
   let lastNativeThreadId = "";
   let lastNativeProjectId = "";
+  let currentCodexUserId = null;
   let suspendedNativeBrowserPanel = null;
   let active = false;
   let destroyed = false;
@@ -430,11 +431,11 @@
 
   function requestNativeFetch(path, body) {
     const bridge = window.electronBridge;
-    if (!bridge || typeof bridge.sendMessageFromView !== "function") return Promise.resolve(null);
+    if (!bridge || typeof bridge.sendMessageFromView !== "function") return Promise.resolve(undefined);
     return new Promise((resolve) => {
       const requestId = `taskboard-native-fetch-${crypto.randomUUID()}`;
       let settled = false;
-      const finish = (value = null) => {
+      const finish = (value) => {
         if (settled) return;
         settled = true;
         window.clearTimeout(timeout);
@@ -449,13 +450,17 @@
           || message.type !== "fetch-response"
           || message.requestId !== requestId
         ) return;
+        if (!Number.isInteger(message.status) || message.status < 200 || message.status >= 300) {
+          finish(undefined);
+          return;
+        }
         try {
           finish(JSON.parse(message.bodyJsonString || "null"));
         } catch (_) {
-          finish();
+          finish(undefined);
         }
       };
-      const timeout = window.setTimeout(finish, 1_000);
+      const timeout = window.setTimeout(() => finish(undefined), 1_000);
       window.addEventListener("message", onMessage);
       try {
         bridge.sendMessageFromView({
@@ -466,7 +471,7 @@
           body: JSON.stringify(body),
         });
       } catch (_) {
-        finish();
+        finish(undefined);
       }
     });
   }
@@ -485,17 +490,14 @@
       (Array.isArray(bootstrap?.globalStateEntries) ? bootstrap.globalStateEntries : [])
         .map((entry) => [entry?.key, entry?.value]),
     );
+    const [currentLocalProjects, currentRemoteProjects] = await Promise.all([
+      requestNativeFetch("get-global-state", { key: "local-projects" }),
+      requestNativeFetch("get-global-state", { key: "remote-projects" }),
+    ]);
     const metadata = new Map();
-    const liveLocalProjects = typeof requestNativeFetch === "function"
-      ? (await requestNativeFetch("get-global-state", { key: "local-projects" }))?.value
-      : null;
-    const localProjects = (
-      liveLocalProjects
-      && typeof liveLocalProjects === "object"
-      && !Array.isArray(liveLocalProjects)
-    )
-      ? liveLocalProjects
-      : entries.get("local-projects");
+    const localProjects = currentLocalProjects === undefined
+      ? entries.get("local-projects")
+      : currentLocalProjects?.value;
     if (localProjects && typeof localProjects === "object" && !Array.isArray(localProjects)) {
       Object.entries(localProjects).forEach(([projectId, project]) => {
         const id = projectId.trim();
@@ -512,7 +514,9 @@
         });
       });
     }
-    const remoteProjects = entries.get("remote-projects");
+    const remoteProjects = currentRemoteProjects === undefined
+      ? entries.get("remote-projects")
+      : currentRemoteProjects?.value;
     if (Array.isArray(remoteProjects)) {
       remoteProjects.forEach((project) => {
         const id = typeof project?.id === "string" ? project.id.trim() : "";
@@ -535,8 +539,14 @@
   }
 
   async function activeNativeWorkspaceRoots() {
-    const roots = (await requestNativeFetch("active-workspace-roots", {}))?.roots;
-    return Array.isArray(roots) ? roots.filter((root) => typeof root === "string") : [];
+    const response = await requestNativeFetch("active-workspace-roots", {});
+    const roots = response?.roots;
+    // Keep an unavailable endpoint distinct from a successful response with no
+    // workspace roots. The latter must not be treated as a confirmed switch.
+    return {
+      available: Array.isArray(roots),
+      roots: Array.isArray(roots) ? roots.filter((root) => typeof root === "string") : [],
+    };
   }
 
   function normalizeNativeRootPath(value) {
@@ -548,6 +558,22 @@
       || (normalizedSlashes.startsWith("/") ? "/" : normalizedSlashes);
     if (!windowsPath || !/^[A-Za-z]:/.test(withoutTrailingSlash)) return withoutTrailingSlash;
     return `${withoutTrailingSlash[0].toLowerCase()}${withoutTrailingSlash.slice(1)}`;
+  }
+
+  async function canonicalNativeRootPaths(roots) {
+    const normalizedRoots = roots.map((root) => normalizeNativeRootPath(root));
+    const response = await requestNativeFetch("workspace-root-options", {
+      hostId: "local",
+      canonicalizeRoots: roots,
+    });
+    const canonicalPathByRoot = response?.canonicalPathByRoot;
+    if (!canonicalPathByRoot || typeof canonicalPathByRoot !== "object") return normalizedRoots;
+    const canonicalRoots = roots.map((root) => (
+      typeof canonicalPathByRoot[root] === "string"
+        ? normalizeNativeRootPath(canonicalPathByRoot[root])
+        : ""
+    ));
+    return canonicalRoots.every(Boolean) ? canonicalRoots : normalizedRoots;
   }
 
   function readCodexProjects(metadata = codexProjectMetadata) {
@@ -595,11 +621,14 @@
   }
 
   async function captureHostContext() {
+    currentCodexUserId = null;
     const todoProgress = nativeTodoProgress();
-    const [selectedProjectId, projectMetadata] = await Promise.all([
+    const [selectedProjectId, projectMetadata, currentUser] = await Promise.all([
       selectedNativeProjectId(),
       readCodexProjectMetadata(),
+      requestHost("read-current-user"),
     ]);
+    currentCodexUserId = typeof currentUser.userId === "string" ? currentUser.userId : "";
     codexProjectMetadata = projectMetadata;
     if (selectedProjectId) lastNativeProjectId = selectedProjectId;
     let projects = readCodexProjects(projectMetadata);
@@ -752,19 +781,17 @@
   }
 
   function readCodexUser() {
-    const avatar = Array.from(document.querySelectorAll("img"))
-      .find((image) => image.src.includes("cdn.auth0.com/avatars/"));
-    const profileButton = avatar?.closest("button")
-      || Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((button) => (
-        normalizedLabel(button.getAttribute("aria-label")).includes("profile")
-        || normalizedLabel(button.getAttribute("aria-label")).includes("个人资料")
-      ));
+    const profileButton = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((button) => (
+      normalizedLabel(button.getAttribute("aria-label")).includes("profile")
+      || normalizedLabel(button.getAttribute("aria-label")).includes("个人资料")
+    ));
     const name = profileButton?.textContent?.replace(/\s+/g, " ").trim();
-    if (!name) return null;
+    if (currentCodexUserId === null || !name) return null;
+    const avatar = profileButton.querySelector("img");
     const avatarUrl = avatar?.currentSrc || avatar?.src || null;
     return {
       type: "user",
-      id: userIdFromName(name),
+      id: currentCodexUserId || userIdFromName(name),
       name,
       avatarUrl,
     };
@@ -1004,9 +1031,20 @@
   async function nativeProjectContext() {
     const bootstrap = await window.electronBridge?.getInitialSidebarBootstrap?.();
     const entries = bootstrap?.globalStateEntries ?? [];
-    const localProjects = entries.find((entry) => entry.key === "local-projects")?.value ?? {};
+    const currentLocalProjects = await requestNativeFetch(
+      "get-global-state",
+      { key: "local-projects" },
+    );
+    const localProjects = currentLocalProjects === undefined
+      ? entries.find((entry) => entry.key === "local-projects")?.value
+      : currentLocalProjects?.value;
+    const projectEntries = localProjects
+      && typeof localProjects === "object"
+      && !Array.isArray(localProjects)
+      ? Object.entries(localProjects)
+      : [];
     return {
-      projects: Object.entries(localProjects).flatMap(([id, project]) => (
+      projects: projectEntries.flatMap(([id, project]) => (
         project && Array.isArray(project.rootPaths)
           ? [{ ...project, id }]
           : []
@@ -1017,12 +1055,22 @@
   async function resolveNativeProject(requestedProjectId, workspacePath) {
     const context = await nativeProjectContext();
     const normalizedWorkspacePath = normalizeNativeRootPath(workspacePath);
-    const project = context.projects.find((candidate) => (
-      candidate.id === requestedProjectId
-      || candidate.rootPaths.some((root) => (
-        normalizeNativeRootPath(root) === normalizedWorkspacePath
-      ))
-    )) ?? null;
+    let project = context.projects.find((candidate) => candidate.id === requestedProjectId) ?? null;
+    if (!project && normalizedWorkspacePath) {
+      const projectRoots = context.projects.flatMap((candidate) => candidate.rootPaths.flatMap((root) => (
+        typeof root === "string" && normalizeNativeRootPath(root)
+          ? [{ project: candidate, root }]
+          : []
+      )));
+      const canonicalRoots = await canonicalNativeRootPaths([
+        workspacePath,
+        ...projectRoots.map(({ root }) => root),
+      ]);
+      const matchingRootIndex = canonicalRoots.slice(1).findIndex((root) => (
+        root === canonicalRoots[0]
+      ));
+      if (matchingRootIndex >= 0) project = projectRoots[matchingRootIndex].project;
+    }
     const targetRoot = normalizedWorkspacePath ? workspacePath : project?.rootPaths[0];
     return project && typeof targetRoot === "string" && normalizeNativeRootPath(targetRoot)
       ? { projectId: project.id, targetRoot }
@@ -1044,18 +1092,24 @@
     }
   }
 
-  async function waitForNativeProject(targetRoot) {
+  async function waitForNativeProject(targetRoot, expectedProjectId) {
     const deadline = Date.now() + 8_000;
-    const normalizedTargetRoot = normalizeNativeRootPath(targetRoot);
     while (Date.now() < deadline) {
-      const [projectId, activeRoots] = await Promise.all([
+      const [projectId, activeWorkspace] = await Promise.all([
         selectedNativeProjectId(),
         activeNativeWorkspaceRoots(),
       ]);
-      if (
-        projectId
-        && normalizeNativeRootPath(activeRoots[0]) === normalizedTargetRoot
-      ) return projectId;
+      if (projectId && projectId === expectedProjectId) {
+        // Some Codex desktop builds no longer expose active-workspace-roots.
+        // A confirmed selected project is still safe when that endpoint is unavailable;
+        // keep rejecting an explicitly reported, mismatched workspace root.
+        if (!activeWorkspace.available) return projectId;
+        const [canonicalTargetRoot, ...canonicalActiveRoots] = await canonicalNativeRootPaths([
+          targetRoot,
+          ...activeWorkspace.roots,
+        ]);
+        if (canonicalActiveRoots.some((root) => root === canonicalTargetRoot)) return projectId;
+      }
       await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
     throw new Error(hostText(
@@ -1110,12 +1164,12 @@
             "The target project or worktree is not mapped in Codex",
           ));
         }
-        const { targetRoot } = target;
+        const { projectId, targetRoot } = target;
         bridge.sendMessageFromView({
           type: "electron-add-new-workspace-root-option",
           root: targetRoot,
         });
-        lastNativeProjectId = await waitForNativeProject(targetRoot);
+        lastNativeProjectId = await waitForNativeProject(targetRoot, projectId);
       }
 
       closeTaskboard(false);
