@@ -434,6 +434,7 @@ export function TaskDetail({
   const editingComposerRef = useRef<InlineMediaComposerHandle>(null);
   const editingCommentScrollPositionRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const descriptionAttachmentPickerOpenRef = useRef(false);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const editCommentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const editingUploadedAttachmentsRef = useRef<Map<string, Attachment>>(new Map());
@@ -1055,7 +1056,16 @@ export function TaskDetail({
                 {editingDescription ? (
                   <div
                     className="issue-description-composer"
+                    onMouseDownCapture={(event) => {
+                      if (
+                        event.target instanceof Element
+                        && event.target.closest(
+                          ".inline-media-image > button, .inline-media-attachment > button, .issue-description-attach-button",
+                        )
+                      ) event.preventDefault();
+                    }}
                     onBlur={(event) => {
+                      if (descriptionAttachmentPickerOpenRef.current) return;
                       if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
                       void saveDescription();
                     }}
@@ -1094,20 +1104,34 @@ export function TaskDetail({
                       disabled={savingProperty === "description"}
                       aria-label={text("添加描述附件", "Add description attachments")}
                       title={text("添加附件", "Add attachments")}
-                      onClick={() => attachmentInputRef.current?.click()}
+                      onClick={() => {
+                        const input = attachmentInputRef.current;
+                        if (!input) return;
+                        descriptionAttachmentPickerOpenRef.current = true;
+                        input.click();
+                      }}
                     >
                       <AttachmentIcon color="currentColor" />
                     </button>
                     <input
-                      ref={attachmentInputRef}
+                      ref={(input) => {
+                        attachmentInputRef.current = input;
+                        if (!input) return;
+                        input.oncancel = () => {
+                          descriptionAttachmentPickerOpenRef.current = false;
+                          requestAnimationFrame(() => descriptionComposerRef.current?.focus());
+                        };
+                      }}
                       type="file"
                       multiple
                       hidden
                       onChange={(event) => {
+                        descriptionAttachmentPickerOpenRef.current = false;
                         if (event.currentTarget.files) {
                           descriptionComposerRef.current?.addFiles(event.currentTarget.files);
                         }
                         event.currentTarget.value = "";
+                        requestAnimationFrame(() => descriptionComposerRef.current?.focus());
                       }}
                     />
                   </div>
@@ -1309,6 +1333,15 @@ export function TaskDetail({
                     );
                   }
                   const comment = item.comment;
+                  const commentActor: ActorIdentity = comment.authorType === currentUser.type
+                    && comment.authorId === currentUser.id
+                    ? currentUser
+                    : {
+                        type: comment.authorType,
+                        id: comment.authorId,
+                        name: comment.authorName,
+                        avatarUrl: comment.authorAvatarUrl,
+                      };
                   return (
                   <article
                     className={`comment-entry is-${comment.authorType}`}
@@ -1319,14 +1352,9 @@ export function TaskDetail({
                       <header className="comment-header">
                         <ActorAvatar
                           className="comment-avatar"
-                          actor={{
-                            type: comment.authorType,
-                            id: comment.authorId,
-                            name: comment.authorName,
-                            avatarUrl: comment.authorAvatarUrl,
-                          }}
+                          actor={commentActor}
                         />
-                        <strong>{comment.authorName}</strong>
+                        <strong>{commentActor.name}</strong>
                         <time title={exactTime(comment.createdAt, locale)}>{relativeTime(comment.createdAt, locale)}</time>
                         {comment.version > 1 && (
                           <span
