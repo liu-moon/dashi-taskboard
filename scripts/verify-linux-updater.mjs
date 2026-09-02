@@ -50,7 +50,7 @@ for (const [platformKey, artifactPath] of [
     signature,
   });
 
-  const expectedUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${path.basename(artifactPath)}`;
+  const expectedUrl = `https://github.com/liu-moon/dashi-taskboard/releases/download/${releaseTag}/${path.basename(artifactPath)}`;
   const platform = latest.platforms?.[platformKey];
   if (platform?.url !== expectedUrl || platform.signature !== signature) {
     throw new Error(`latest.json ${platformKey} updater entry is incorrect`);

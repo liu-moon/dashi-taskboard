@@ -555,8 +555,8 @@ jobs:
           jq \
             --rawfile deb_signature "$LINUX_DEB.sig" \
             --rawfile appimage_signature "$LINUX_APPIMAGE.sig" \
-            --arg deb_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
-            --arg appimage_url "https://github.com/chuspeeism/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
+            --arg deb_url "https://github.com/liu-moon/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_DEB_NAME" \
+            --arg appimage_url "https://github.com/liu-moon/dashi-taskboard/releases/download/$RELEASE_TAG/$LINUX_APPIMAGE_NAME" \
             '.platforms["linux-x86_64-deb"] = {signature: $deb_signature, url: $deb_url}
              | .platforms["linux-x86_64-appimage"] = {signature: $appimage_signature, url: $appimage_url}' \
             "$LATEST_PATH" > "$LATEST_PATH.linux"

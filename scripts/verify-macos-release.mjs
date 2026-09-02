@@ -159,7 +159,7 @@ await verifyUpdaterSignature({
 
 const latest = JSON.parse(await readFile(path.join(releaseDirectory, "latest.json"), "utf8"));
 if (latest.version !== releaseVersion) throw new Error("latest.json version is incorrect");
-const expectedUrl = `https://github.com/chuspeeism/dashi-taskboard/releases/download/${releaseTag}/${artifactName}`;
+const expectedUrl = `https://github.com/liu-moon/dashi-taskboard/releases/download/${releaseTag}/${artifactName}`;
 const expectedPlatforms = [
   "darwin-aarch64",
   "darwin-x86_64",
