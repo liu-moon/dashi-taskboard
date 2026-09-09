@@ -319,10 +319,13 @@ export interface AiChatEvent {
   createdAt?: string;
 }
 
-export interface AiChatThreadSnapshot {
+export interface AiChatThreadSummary {
   thread: AiChatThread;
-  events: AiChatEvent[];
   runs: AiChatRun[];
+}
+
+export interface AiChatThreadSnapshot extends AiChatThreadSummary {
+  events: AiChatEvent[];
 }
 
 export interface CodexProjectIdentity {
@@ -533,15 +536,4 @@ export interface TaskDraft {
   startDate: string | null;
   dueDate: string | null;
   recurrence: Recurrence | null;
-}
-
-export interface TaskEvent {
-  type: string;
-  projectId?: string;
-  taskId?: string;
-  task?: Task;
-  comment?: Comment;
-  attachment?: Attachment;
-  project?: Project;
-  at: string;
 }

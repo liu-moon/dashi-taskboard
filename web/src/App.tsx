@@ -1,3 +1,4 @@
+import { resolveInlineAttachments } from "./inlineAttachments";
 import {
   Fragment,
   lazy,
@@ -25,7 +26,6 @@ import {
   deleteProject as deleteProjectRequest,
   getAiChatCatalog,
   getCodexThreadProgress,
-  getHostRuntime,
   getJiraConnection,
   getTaskboardRevision,
   getTaskboardMetadata,
@@ -64,9 +64,9 @@ import { IssueListView } from "./components/IssueListView";
 import { JiraConnectionDialog } from "./components/JiraConnectionDialog";
 import { ArchivedTasksColumn, OtherTasksPanel } from "./components/OtherTasksPanel";
 import {
-  resolveInlineMediaMarkdown,
+  type PendingInlineAttachment,
   type PendingInlineImage,
-} from "./components/InlineMediaComposer";
+} from "./documentModel";
 import { LinearIcon } from "./components/LinearIcon";
 import {
   DeleteIcon,
@@ -108,6 +108,7 @@ import {
   type OtherTaskTab,
 } from "./issueBoardStatuses";
 import {
+  indexAiThreadsByTask,
   normalizeCodexThreadId,
   taskCardPresentation,
   type TaskCardPresentation,
@@ -173,7 +174,6 @@ const GanttView = lazy(() => import("./components/GanttView").then((module) => (
 })));
 
 interface EditorState {
-  task: Task | null;
   status: TaskStatus;
   projectId?: string | null;
 }
@@ -384,7 +384,7 @@ function getInitialTheme(): Theme {
   const host = query.get("host");
   if (
     window.parent !== window
-    && (host === "codex" || host === "workbuddy" || host === "deepseek-harness")
+    && (host === "codex" || host === "deepseek-harness")
   ) {
     const fromQuery = query.get("theme");
     if (isTheme(fromQuery)) return fromQuery;
@@ -589,23 +589,39 @@ function LocalRealtimeSync({
   setAttachmentsRevision,
   setReadmeRevision,
 }: LocalRealtimeSyncProps) {
+  const selectionRef = useRef({ selectedProjectId, detailTaskId });
+  const eventsUrl = resolveTaskboardUrl("/api/events");
+
+  useLayoutEffect(() => {
+    selectionRef.current = { selectedProjectId, detailTaskId };
+  }, [selectedProjectId, detailTaskId]);
+
   useEffect(() => {
-    const source = new EventSource(resolveTaskboardUrl("/api/events"));
+    const source = new EventSource(eventsUrl);
     let refreshTimer: number | undefined;
     let refreshProjectsPending = false;
-    let refreshTasksPending = false;
+    const pendingTaskProjects = new Set<string | undefined>();
 
-    const scheduleRefresh = (options: { projects?: boolean; tasks?: boolean }) => {
+    const scheduleRefresh = (options: { projects?: boolean; tasks?: boolean; projectId?: string }) => {
       refreshProjectsPending ||= options.projects === true;
-      refreshTasksPending ||= options.tasks === true;
+      if (options.tasks) pendingTaskProjects.add(options.projectId);
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
+        const { selectedProjectId } = selectionRef.current;
         if (refreshProjectsPending) void refreshProjectList();
-        if (refreshTasksPending && selectedProjectId) {
+        if (
+          selectedProjectId
+          && pendingTaskProjects.size > 0
+          && (
+            selectedProjectId === ALL_PROJECTS_ID
+            || pendingTaskProjects.has(undefined)
+            || pendingTaskProjects.has(selectedProjectId)
+          )
+        ) {
           void refreshTasks(selectedProjectId, { quiet: true });
         }
         refreshProjectsPending = false;
-        refreshTasksPending = false;
+        pendingTaskProjects.clear();
       }, 120);
     };
 
@@ -629,6 +645,7 @@ function LocalRealtimeSync({
         void refreshProjectBoardDisplaySettings();
         return;
       }
+      const { selectedProjectId, detailTaskId } = selectionRef.current;
       const eventProjectId = payload.projectId ?? payload.project?.id;
       const affectsSelectedProject = Boolean(selectedProjectId)
         && (
@@ -641,11 +658,15 @@ function LocalRealtimeSync({
         return;
       }
       if (event.type === "project.labels.updated") {
-        scheduleRefresh({ projects: true, tasks: affectsSelectedProject });
+        scheduleRefresh({ projects: true, tasks: affectsSelectedProject, projectId: eventProjectId });
         return;
       }
       if (event.type.startsWith("task.")) {
-        scheduleRefresh({ projects: true, tasks: affectsSelectedProject });
+        scheduleRefresh({
+          projects: event.type !== "task.relation.updated",
+          tasks: affectsSelectedProject,
+          projectId: eventProjectId,
+        });
         return;
       }
       if (!affectsSelectedProject) return;
@@ -657,7 +678,7 @@ function LocalRealtimeSync({
         if (!detailTaskId || !payload.taskId || payload.taskId === detailTaskId) {
           setCommentsRevision((current) => current + 1);
         }
-        scheduleRefresh({ tasks: true });
+        scheduleRefresh({ tasks: true, projectId: eventProjectId });
         return;
       }
       if (event.type.startsWith("attachment.")) {
@@ -671,6 +692,7 @@ function LocalRealtimeSync({
     EVENT_NAMES.forEach((name) => source.addEventListener(name, handleEvent));
     source.onopen = () => {
       setConnection("live");
+      const { selectedProjectId, detailTaskId } = selectionRef.current;
       void refreshProjectBoardDisplaySettings();
       scheduleRefresh({ projects: true, tasks: Boolean(selectedProjectId) });
       if (selectedProjectId && selectedProjectId !== ALL_PROJECTS_ID) {
@@ -681,7 +703,9 @@ function LocalRealtimeSync({
         setAttachmentsRevision((current) => current + 1);
       }
     };
-    source.onerror = () => setConnection("reconnecting");
+    source.onerror = () => {
+      setConnection("reconnecting");
+    };
 
     return () => {
       window.clearTimeout(refreshTimer);
@@ -689,11 +713,10 @@ function LocalRealtimeSync({
       source.close();
     };
   }, [
-    detailTaskId,
+    eventsUrl,
     refreshProjectBoardDisplaySettings,
     refreshProjectList,
     refreshTasks,
-    selectedProjectId,
     setAttachmentsRevision,
     setCommentsRevision,
     setConnection,
@@ -706,7 +729,7 @@ function LocalRealtimeSync({
 export function App() {
   const query = useMemo(() => new URL(document.baseURI).searchParams, []);
   const host = query.get("host");
-  const embedded = host === "codex" || host === "workbuddy" || host === "deepseek-harness";
+  const embedded = host === "codex" || host === "deepseek-harness";
   const undoShortcut = navigator.userAgent.includes("Macintosh") ? "⌘Z" : "Ctrl+Z";
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [hostContext, setHostContext] = useState<HostContext | null>(null);
@@ -723,6 +746,12 @@ export function App() {
   const [aiImportReadyProjectId, setAiImportReadyProjectId] = useState<string | null>(null);
   const [aiThreads, setAiThreads] = useState<AiChatThread[]>([]);
   const [aiOpenThreadRequest, setAiOpenThreadRequest] = useState<AiChatOpenThreadRequest | null>(null);
+  const aiOpenThreadRequestSequenceRef = useRef(0);
+  const handleAiOpenThreadRequestHandled = useCallback((requestId: number) => {
+    setAiOpenThreadRequest((current) => (
+      current?.requestId === requestId ? null : current
+    ));
+  }, []);
   const [readActivityKeys, setReadActivityKeys] = useState<Record<string, string>>({});
   const [codexThreadProgress, setCodexThreadProgress] = useState<
     Record<string, {
@@ -731,7 +760,6 @@ export function App() {
       running: boolean;
     } | null>
   >({});
-  const [processingNow, setProcessingNow] = useState(() => Date.now());
   const [recentProjectIds, setRecentProjectIds] = useState(readRecentProjectIds);
   const initialProjectId = query.get("project") ?? recentProjectIds[0] ?? ALL_PROJECTS_ID;
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1198,8 +1226,7 @@ export function App() {
     : projectMenuCandidates;
   const firstEmptyProjectId = projectMenuChoices.find((project) => project.issueCount === 0)?.id ?? null;
   const hasProjectsWithIssues = projectMenuChoices.some((project) => project.issueCount > 0);
-  const editorProjectId = editor?.task?.projectId
-    ?? editor?.projectId
+  const editorProjectId = editor?.projectId
     ?? (newTaskDraft?.projectId === selectedProjectId ? newTaskDraft.targetProjectId : undefined)
     ?? (isAllProjects ? GLOBAL_PROJECT_ID : selectedProjectId);
   const developmentEditorProjectId = isAllProjects && editor ? editorProjectId : null;
@@ -1813,23 +1840,6 @@ export function App() {
     };
   }, [embedded, host]);
 
-  useEffect(() => {
-    if (host !== "workbuddy") return;
-    let disposed = false;
-    const syncRuntime = async () => {
-      try {
-        const runtime = await getHostRuntime();
-        if (!disposed) setHostContext(runtime);
-      } catch {}
-    };
-    void syncRuntime();
-    const timer = window.setInterval(syncRuntime, 1_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [host]);
-
   useLayoutEffect(() => {
     if (!embedded || window.parent === window || !dragRegionRef.current) return;
     const region = dragRegionRef.current;
@@ -2208,7 +2218,7 @@ export function App() {
         && !isJiraProject
       ) {
         event.preventDefault();
-        setEditor({ task: null, status: "todo" });
+        setEditor({ status: "todo" });
       }
       if (
         event.key === "/"
@@ -2300,6 +2310,7 @@ export function App() {
     setOtherTasksTab(otherTaskTabs[0]);
   }, [otherTaskTabsKey, otherTasksAvailable, otherTasksTab]);
 
+  const aiThreadsByTask = useMemo(() => indexAiThreadsByTask(aiThreads), [aiThreads]);
   const taskPresentations = useMemo(() => Object.fromEntries(tasks.map((task) => {
     const storageKey = issueReadStorageKey(issueReadMode, task);
     const readActivityKey = readActivityKeys[storageKey] ?? taskboardStorage.getItem(storageKey);
@@ -2311,14 +2322,14 @@ export function App() {
     const taskThreadId = normalizeCodexThreadId(task.threadId);
     return [task.id, taskCardPresentation(
       task,
-      aiThreads,
+      aiThreadsByTask.get(task.id) ?? [],
       unread,
       runningNativeThreadId,
       hostContext?.threadTodoProgress ?? null,
       taskThreadId ? codexThreadProgress[taskThreadId] ?? null : undefined,
     )];
   })) as Record<string, TaskCardPresentation>, [
-    aiThreads,
+    aiThreadsByTask,
     codexThreadProgress,
     hostContext?.threadId,
     hostContext?.threadRunning,
@@ -2327,18 +2338,6 @@ export function App() {
     readActivityKeys,
     tasks,
   ]);
-  const hasRunningTask = useMemo(
-    () => Object.values(taskPresentations).some((presentation) => presentation.processing.running),
-    [taskPresentations],
-  );
-
-  useEffect(() => {
-    setProcessingNow(Date.now());
-    if (!hasRunningTask) return;
-    const timer = window.setInterval(() => setProcessingNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [hasRunningTask]);
-
 
   function selectBoardView(view: BoardView) {
     closeContextMenu();
@@ -2373,55 +2372,46 @@ export function App() {
 
   async function saveEditor(
     draft: TaskDraft,
-    attachments: File[],
+    inlineFiles: PendingInlineAttachment[],
     inlineImages: PendingInlineImage[],
     createOptions?: NewTaskCreateOptions,
   ) {
     if (!selectedProjectId || !editor) return;
     const targetProjectId = editorProjectId ?? selectedProjectId;
     setActionError(null);
-    const creating = editor.task === null;
-    let saved: Task;
-    try {
-      saved = editor.task
-        ? await updateTaskRequest(editor.task, draft)
-        : await createTaskRequest(targetProjectId, draft);
-    } catch (error) {
-      if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
-        void refreshTasks(taskScopeProjectId, { quiet: true });
-      }
-      throw error;
-    }
-    if (creating) {
-      setProjects((current) => current.map((project) => (
-        project.id === targetProjectId
-          ? { ...project, issueCount: project.issueCount + 1 }
-          : project
-      )));
-    }
-    let failedAttachments = 0;
+    let saved = await createTaskRequest(targetProjectId, draft);
+    setProjects((current) => current.map((project) => (
+      project.id === targetProjectId
+        ? { ...project, issueCount: project.issueCount + 1 }
+        : project
+    )));
     let postCreateWriteFailed = false;
-    if (creating && (attachments.length > 0 || inlineImages.length > 0)) {
-      const [results, inlineResults] = await Promise.all([
+    if (inlineFiles.length > 0 || inlineImages.length > 0) {
+      const [fileResults, inlineResults] = await Promise.all([
           Promise.allSettled(
-            attachments.map((file) => uploadAttachment(saved.id, file, "attachment")),
+            inlineFiles.map((file) => uploadAttachment(saved.id, file.file, "attachment")),
           ),
           Promise.allSettled(
             inlineImages.map((image) => uploadAttachment(saved.id, image.file, "inline")),
           ),
       ]);
-      failedAttachments = results.filter((result) => result.status === "rejected").length;
+      const fileAttachments = fileResults.flatMap((result) => (
+        result.status === "fulfilled" ? [result.value] : []
+      ));
       const inlineAttachments = inlineResults.flatMap((result) => (
         result.status === "fulfilled" ? [result.value] : []
       ));
-      if (inlineAttachments.length !== inlineImages.length) {
+      if (
+        fileAttachments.length !== inlineFiles.length
+        || inlineAttachments.length !== inlineImages.length
+      ) {
         postCreateWriteFailed = true;
-      } else if (inlineImages.length > 0) {
+      } else if (inlineFiles.length > 0 || inlineImages.length > 0) {
         try {
-          const description = resolveInlineMediaMarkdown(
+          const description = resolveInlineAttachments(
             draft.description,
-            inlineImages,
-            inlineAttachments,
+            [...inlineImages, ...inlineFiles],
+            [...inlineAttachments, ...fileAttachments],
           );
           saved = await updateTaskRequest(saved, { ...draft, description });
         } catch {
@@ -2434,7 +2424,7 @@ export function App() {
     let addedParentId: string | null = null;
     const addedRelatedIds: string[] = [];
     let relationWriteFailed = false;
-    if (creating && createOptions) {
+    if (createOptions) {
       const { parentId, relatedIds, subIssueIds } = createOptions.relations;
       try {
         if (parentId) {
@@ -2467,71 +2457,56 @@ export function App() {
       ...current.filter((task) => !relationUpdates.has(task.id)),
       ...relationUpdates.values(),
     ]));
-    if (creating) setNewTaskDraft(null);
+    setNewTaskDraft(null);
     const failedWrites = [
       ...(relationWriteFailed ? [{ zh: "关系", en: "relations" }] : []),
-      ...(postCreateWriteFailed ? [{ zh: "正文或图片", en: "description or images" }] : []),
-      ...(failedAttachments > 0 ? [{
-        zh: `${failedAttachments} 个附件`,
-        en: `${failedAttachments} attachment${failedAttachments === 1 ? "" : "s"}`,
-      }] : []),
+      ...(postCreateWriteFailed ? [{ zh: "正文或媒体", en: "description or media" }] : []),
     ];
-    if (!creating || !createOptions?.keepOpen || failedWrites.length > 0) setEditor(null);
+    if (!createOptions?.keepOpen || failedWrites.length > 0) setEditor(null);
     if (failedWrites.length > 0) {
       setActionError(text(
         `${saved.identifier} 已创建，但以下内容写入失败：${failedWrites.map((failure) => failure.zh).join("、")}。`,
         `${saved.identifier} was created, but these follow-up writes failed: ${failedWrites.map((failure) => failure.en).join(", ")}.`,
       ));
     }
-    if (creating) {
-      pushUndo(null, async () => {
-        const restoredRelations = new Map<string, Task>();
-        const candidate = tasksRef.current.find((task) => task.id === saved.id);
-        let current = candidate && candidate.version >= saved.version ? candidate : saved;
-        if (addedParentId) {
-          const result = await removeTaskRelation(current, "parent", addedParentId);
-          current = result.task;
-          restoredRelations.set(result.relatedTask.id, result.relatedTask);
-        }
-        for (const relatedId of [...addedRelatedIds].reverse()) {
-          const result = await removeTaskRelation(current, "related", relatedId);
-          current = result.task;
-          restoredRelations.set(result.relatedTask.id, result.relatedTask);
-        }
-        for (const movedSubIssue of [...movedSubIssues].reverse()) {
-          const latestChild = tasksRef.current.find((task) => task.id === movedSubIssue.task.id);
-          const child = latestChild && latestChild.version >= movedSubIssue.task.version
-            ? latestChild
-            : movedSubIssue.task;
-          const removed = await removeTaskRelation(child, "parent", saved.id);
-          restoredRelations.set(removed.task.id, removed.task);
-          current = removed.relatedTask;
-          if (movedSubIssue.previousParentId) {
-            const restored = await addTaskRelation(
-              removed.task,
-              "parent",
-              movedSubIssue.previousParentId,
-            );
-            restoredRelations.set(restored.task.id, restored.task);
-            restoredRelations.set(restored.relatedTask.id, restored.relatedTask);
-          }
-        }
-        await archiveTaskRequest(current);
-        setTasks((tasks) => sortTasks([
-          ...tasks.filter((task) => task.id !== saved.id && !restoredRelations.has(task.id)),
-          ...[...restoredRelations.values()].filter((task) => task.id !== saved.id),
-        ]));
-      });
-    } else if (editor.task) {
-      const previous = editor.task;
-      const previousAssigneeTarget = assigneeTargetForActor(previous.assignee, currentUser);
-      if (!draft.assigneeTarget || previousAssigneeTarget) {
-        pushUndo(
-          null,
-          () => restoreTaskDetails(previous, saved, previousAssigneeTarget),
-        );
+    pushUndo(null, async () => {
+      const restoredRelations = new Map<string, Task>();
+      const candidate = tasksRef.current.find((task) => task.id === saved.id);
+      let current = candidate && candidate.version >= saved.version ? candidate : saved;
+      if (addedParentId) {
+        const result = await removeTaskRelation(current, "parent", addedParentId);
+        current = result.task;
+        restoredRelations.set(result.relatedTask.id, result.relatedTask);
       }
-    }
+      for (const relatedId of [...addedRelatedIds].reverse()) {
+        const result = await removeTaskRelation(current, "related", relatedId);
+        current = result.task;
+        restoredRelations.set(result.relatedTask.id, result.relatedTask);
+      }
+      for (const movedSubIssue of [...movedSubIssues].reverse()) {
+        const latestChild = tasksRef.current.find((task) => task.id === movedSubIssue.task.id);
+        const child = latestChild && latestChild.version >= movedSubIssue.task.version
+          ? latestChild
+          : movedSubIssue.task;
+        const removed = await removeTaskRelation(child, "parent", saved.id);
+        restoredRelations.set(removed.task.id, removed.task);
+        current = removed.relatedTask;
+        if (movedSubIssue.previousParentId) {
+          const restored = await addTaskRelation(
+            removed.task,
+            "parent",
+            movedSubIssue.previousParentId,
+          );
+          restoredRelations.set(restored.task.id, restored.task);
+          restoredRelations.set(restored.relatedTask.id, restored.relatedTask);
+        }
+      }
+      await archiveTaskRequest(current);
+      setTasks((tasks) => sortTasks([
+        ...tasks.filter((task) => task.id !== saved.id && !restoredRelations.has(task.id)),
+        ...[...restoredRelations.values()].filter((task) => task.id !== saved.id),
+      ]));
+    });
   }
 
   async function moveTask(
@@ -2940,10 +2915,11 @@ export function App() {
 
   function openTaskConversation(conversation: TaskConversationItem) {
     if (conversation.kind === "local-ai" && conversation.aiThreadId) {
-      setAiOpenThreadRequest((current) => ({
+      aiOpenThreadRequestSequenceRef.current += 1;
+      setAiOpenThreadRequest({
         threadId: conversation.aiThreadId!,
-        requestId: (current?.requestId ?? 0) + 1,
-      }));
+        requestId: aiOpenThreadRequestSequenceRef.current,
+      });
       return;
     }
     if (conversation.threadBinding) {
@@ -3515,7 +3491,7 @@ export function App() {
               <button
                 className="icon-button header-create-button"
                 type="button"
-                onClick={() => setEditor({ task: null, status: "todo" })}
+                onClick={() => setEditor({ status: "todo" })}
                 aria-label={text("新建议题", "Create issue")}
                 title={text("新建议题 (C)", "Create issue (C)")}
               >
@@ -3719,22 +3695,25 @@ export function App() {
               <button
                 className="button primary"
                 type="button"
-                onClick={() => setAiOpenThreadRequest((current) => ({
-                  projectId: selectedProject.id,
-                  issueId: null,
-                  composerText: text(
-                    "只检查当前项目目录对应的 Codex 对话。请将其中已完成、处理中和待执行的任务整理并导入当前项目的 Taskboard。",
-                    "Only inspect Codex conversations associated with this project directory. Organize completed, in-progress, and pending tasks, then import them into this project's Taskboard.",
-                  ),
-                  requestId: (current?.requestId ?? 0) + 1,
-                }))}
+                onClick={() => {
+                  aiOpenThreadRequestSequenceRef.current += 1;
+                  setAiOpenThreadRequest({
+                    projectId: selectedProject.id,
+                    issueId: null,
+                    composerText: text(
+                      "只检查当前项目目录对应的 Codex 对话。请将其中已完成、处理中和待执行的任务整理并导入当前项目的 Taskboard。",
+                      "Only inspect Codex conversations associated with this project directory. Organize completed, in-progress, and pending tasks, then import them into this project's Taskboard.",
+                    ),
+                    requestId: aiOpenThreadRequestSequenceRef.current,
+                  });
+                }}
               >
                 {text("导入当前项目任务状态", "Import current project task status")}
               </button>
               <button
                 className="button secondary"
                 type="button"
-                onClick={() => setEditor({ task: null, status: "todo" })}
+                onClick={() => setEditor({ status: "todo" })}
               >
                 {text("添加议题", "Add issue")}
               </button>
@@ -3830,7 +3809,6 @@ export function App() {
                         status={item}
                         tasks={tasksByStatus[item]}
                         presentations={taskPresentations}
-                        now={processingNow}
                         emptyMessage={hasActiveTaskFilters
                           ? text("当前筛选下无匹配议题", "No issues match the current filters")
                           : text("暂无议题", "No issues")}
@@ -3847,7 +3825,7 @@ export function App() {
                         showBody={boardDisplaySettings.body}
                         createEnabled={!isJiraProject}
                         onCreateLabel={persistProjectLabel}
-                        onCreate={(initialStatus) => setEditor({ task: null, status: initialStatus })}
+                        onCreate={(initialStatus) => setEditor({ status: initialStatus })}
                         onEdit={openTaskDetail}
                         onUpdate={updateTaskProperties}
                         onComplete={(task) => moveTask(task, "done")}
@@ -3869,7 +3847,6 @@ export function App() {
                     tasksByStatus={tasksByStatus}
                     archivedTasks={filteredArchivedTasks}
                     presentations={taskPresentations}
-                    now={processingNow}
                     hasActiveFilters={hasActiveTaskFilters}
                     isDropTarget={otherTasksTab !== "archived" && dropTarget === otherTasksTab}
                     draggedTaskId={draggedTaskId}
@@ -3888,7 +3865,7 @@ export function App() {
                     onTabChange={setOtherTasksTab}
                     onCreate={isJiraProject
                       ? undefined
-                      : (initialStatus) => setEditor({ task: null, status: initialStatus })}
+                      : (initialStatus) => setEditor({ status: initialStatus })}
                     onRestore={(task) => void restoreArchivedTask(task)}
                     onDelete={setPendingArchivedTaskDelete}
                     onEdit={openTaskDetail}
@@ -4119,17 +4096,16 @@ export function App() {
 
       {editor && (
         <TaskEditor
-          key={editor.task?.id ?? `new-${selectedProjectId}-${editor.status}`}
+          key={`new-${selectedProjectId}-${editor.status}`}
           projectId={editorProjectId}
-          projectOptions={!editor.task && isAllProjects ? createTargetProjects : undefined}
+          projectOptions={isAllProjects ? createTargetProjects : undefined}
           onProjectChange={(projectId) => setEditor((current) => (
             current ? { ...current, projectId } : current
           ))}
-          task={editor.task}
           tasks={tasks.filter((task) => task.projectId === editorProjectId)}
           referenceTasks={referenceTasks.filter((task) => task.projectId === editorProjectId)}
           initialStatus={editor.status}
-          initialDraft={editor.task || newTaskDraft?.projectId !== selectedProjectId
+          initialDraft={newTaskDraft?.projectId !== selectedProjectId
             ? null
             : newTaskDraft.draft}
           labels={projects.find((project) => project.id === editorProjectId)?.labels ?? []}
@@ -4138,13 +4114,11 @@ export function App() {
           developmentScanLoading={developmentScanLoading}
           onCreateLabel={(label) => persistProjectLabel(label, editorProjectId ?? selectedProjectId)}
           onCancel={(draft) => {
-            if (!editor.task) {
-              setNewTaskDraft(draft ? {
-                projectId: selectedProjectId,
-                targetProjectId: editorProjectId,
-                draft,
-              } : null);
-            }
+            setNewTaskDraft(draft ? {
+              projectId: selectedProjectId,
+              targetProjectId: editorProjectId,
+              draft,
+            } : null);
             setEditor(null);
           }}
           onSave={saveEditor}
@@ -4184,6 +4158,7 @@ export function App() {
             codexProjectIdentity={selectedCodexProjectIdentity}
             onThreadsChange={setAiThreads}
             openThreadRequest={aiOpenThreadRequest}
+            onOpenThreadRequestHandled={handleAiOpenThreadRequestHandled}
           />
         </Suspense>
       )}

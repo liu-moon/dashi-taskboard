@@ -1,3 +1,4 @@
+import { resolveInlineAttachments, uploadInlineAttachments } from "../inlineAttachments";
 import {
   useCallback,
   useEffect,
@@ -75,16 +76,13 @@ import {
 } from "./SemanticIcons";
 import {
   createInlineMediaSegments,
-  InlineMediaComposer,
   inlineMediaFiles,
   inlineMediaImages,
   inlineMediaText,
-  resolveInlineAttachmentMarkdown,
-  resolveInlineMediaMarkdown,
   serializeInlineMedia,
-  type InlineMediaComposerHandle,
   type InlineMediaSegment,
-} from "./InlineMediaComposer";
+} from "../documentModel";
+import { InlineMediaComposer, type InlineMediaComposerHandle } from "./InlineMediaComposer";
 import {
   IssueParentLink,
   IssueRelationSidebar,
@@ -437,6 +435,10 @@ export function TaskDetail({
   const descriptionAttachmentPickerOpenRef = useRef(false);
   const commentAttachmentInputRef = useRef<HTMLInputElement>(null);
   const editCommentAttachmentInputRef = useRef<HTMLInputElement>(null);
+  const pendingCommentRef = useRef<{
+    comment: Comment;
+    uploadedAttachments: Map<string, Attachment>;
+  } | null>(null);
   const editingUploadedAttachmentsRef = useRef<Map<string, Attachment>>(new Map());
   const draft = serializeInlineMedia(commentSegments);
   const commentInlineImages = inlineMediaImages(commentSegments);
@@ -775,20 +777,13 @@ export function TaskDetail({
     setSavingProperty("description");
     onError(null);
     try {
-      const uploadedImages = await Promise.all(
-        inlineImages.map((image) => uploadAttachment(currentTask.id, image.file, "inline")),
-      );
-      const uploadedFiles = await Promise.all(
-        inlineFiles.map((file) => uploadAttachment(currentTask.id, file.file, "attachment")),
-      );
-      const resolvedDescription = resolveInlineAttachmentMarkdown(
-        resolveInlineMediaMarkdown(
-          draftDescription,
-          inlineImages,
-          uploadedImages,
-        ),
-        inlineFiles,
-        uploadedFiles,
+      const upload = (file: File, kind: Attachment["kind"]) => uploadAttachment(currentTask.id, file, kind);
+      const uploadedImages = await uploadInlineAttachments(inlineImages, upload);
+      const uploadedFiles = await uploadInlineAttachments(inlineFiles, upload);
+      const resolvedDescription = resolveInlineAttachments(
+        draftDescription,
+        [...inlineImages, ...inlineFiles],
+        [...uploadedImages, ...uploadedFiles],
       ).trim();
       const saved = await onUpdate(currentTask, { description: resolvedDescription }).catch((error) => {
         onError(issueMessageFor(error));
@@ -828,26 +823,34 @@ export function TaskDetail({
     setSubmitting(true);
     setCommentsError(null);
     try {
-      const comment = await createComment(task.id, body);
-      const [inlineAttachments, fileAttachments] = await Promise.all([
-        Promise.all(
-          commentInlineImages.map((image) => uploadCommentAttachment(comment.id, image.file, "inline")),
-        ),
-        Promise.all(
-          commentInlineFiles.map((file) => uploadCommentAttachment(comment.id, file.file, "attachment")),
-        ),
-      ]);
-      const nextComment = commentInlineImages.length > 0 || commentInlineFiles.length > 0
-        ? await updateComment(
-            comment,
-            resolveInlineAttachmentMarkdown(
-              resolveInlineMediaMarkdown(body, commentInlineImages, inlineAttachments),
-              commentInlineFiles,
-              fileAttachments,
-            ),
-          )
+      if (!pendingCommentRef.current) {
+        pendingCommentRef.current = {
+          comment: await createComment(task.id, body),
+          uploadedAttachments: new Map(),
+        };
+      }
+      const { comment, uploadedAttachments } = pendingCommentRef.current;
+      const pending = [...commentInlineImages, ...commentInlineFiles];
+      const uploaded: Attachment[] = [];
+      for (const item of pending) {
+        let attachment = uploadedAttachments.get(item.id);
+        if (!attachment) {
+          attachment = await uploadCommentAttachment(
+            comment.id, item.file, item.type === "pending-image" ? "inline" : "attachment",
+          );
+          uploadedAttachments.set(item.id, attachment);
+        }
+        uploaded.push(attachment);
+      }
+      const resolvedBody = resolveInlineAttachments(body, pending, uploaded);
+      const nextComment = resolvedBody !== comment.body
+        ? await updateComment(comment, resolvedBody)
         : comment;
-      setComments((current) => [...current, nextComment]);
+      // This submission is complete before the existing status/mention work.
+      pendingCommentRef.current = null;
+      setComments((current) => current.some((item) => item.id === nextComment.id)
+        ? current.map((item) => item.id === nextComment.id ? nextComment : item)
+        : [...current, nextComment]);
       setCommentSegments(createInlineMediaSegments());
       if (commentAttachmentInputRef.current) commentAttachmentInputRef.current.value = "";
       let relationAnchor = await getTask(currentTask.id);
@@ -908,31 +911,20 @@ export function TaskDetail({
     setSavingCommentId(comment.id);
     setCommentsError(null);
     try {
-      const uploadedImages: Attachment[] = [];
-      for (const image of editingInlineImages) {
-        let attachment = editingUploadedAttachmentsRef.current.get(image.id);
+      const pending = [...editingInlineImages, ...editingInlineFiles];
+      const uploaded: Attachment[] = [];
+      for (const item of pending) {
+        let attachment = editingUploadedAttachmentsRef.current.get(item.id);
         if (!attachment) {
-          attachment = await uploadCommentAttachment(comment.id, image.file, "inline");
-          editingUploadedAttachmentsRef.current.set(image.id, attachment);
+          attachment = await uploadCommentAttachment(
+            comment.id, item.file, item.type === "pending-image" ? "inline" : "attachment",
+          );
+          editingUploadedAttachmentsRef.current.set(item.id, attachment);
         }
-        uploadedImages.push(attachment);
-      }
-      const uploadedFiles: Attachment[] = [];
-      for (const file of editingInlineFiles) {
-        let attachment = editingUploadedAttachmentsRef.current.get(file.id);
-        if (!attachment) {
-          attachment = await uploadCommentAttachment(comment.id, file.file, "attachment");
-          editingUploadedAttachmentsRef.current.set(file.id, attachment);
-        }
-        uploadedFiles.push(attachment);
+        uploaded.push(attachment);
       }
       const updated = await updateComment(
-        comment,
-        resolveInlineAttachmentMarkdown(
-          resolveInlineMediaMarkdown(body, editingInlineImages, uploadedImages),
-          editingInlineFiles,
-          uploadedFiles,
-        ).trim(),
+        comment, resolveInlineAttachments(body, pending, uploaded).trim(),
       );
       setComments((current) => current.map((item) => item.id === updated.id ? updated : item));
       const relationAnchor = await getTask(currentTask.id);
@@ -1533,6 +1525,7 @@ export function TaskDetail({
                 <InlineMediaComposer
                   ref={composerRef}
                   className="comment-inline-media"
+                  disabled={submitting}
                   segments={commentSegments}
                   mentionTasks={tasks}
                   referenceTasks={referenceTasks}
